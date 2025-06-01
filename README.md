@@ -1,0 +1,1 @@
+# MEXC-Futures-websocket-datacollector
