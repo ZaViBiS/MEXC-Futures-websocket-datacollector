@@ -1,0 +1,8 @@
+{
+  "database_path": "mexc_data.db",
+  "reconnect_delay_seconds": 5,
+  "symbols": [
+    "BTC_USDT",
+    "ETH_USDT"
+  ]
+}
