@@ -28,42 +28,32 @@ type Config struct {
 type Trade struct {
 	ID        uint   `gorm:"primaryKey"`
 	Symbol    string `gorm:"index"`
-	Price     string // зберігати як строку без float конвертації
-	Quantity  string // зберігати як строку без float конвертації
+	Price     string
+	Quantity  string
 	Side      string // "buy" або "sell"
-	Timestamp int64  // мілісекунди
+	Timestamp int64
 	TradeID   string `gorm:"index"`
 }
 
 type OrderBook struct {
 	ID        uint   `gorm:"primaryKey"`
 	Symbol    string `gorm:"index"`
-	Bids      string // JSON масив [[price, quantity], ...] як строка
-	Asks      string // JSON масив [[price, quantity], ...] як строка
-	Timestamp int64  // мілісекунди
+	Bids      string // JSON масив
+	Asks      string // JSON масив
+	Timestamp int64
 }
 
-// WebSocket повідомлення
-type WSMessage struct {
-	Method string      `json:"method"`
-	Params interface{} `json:"params"`
-	ID     int         `json:"id,omitempty"`
-}
-
-type TradeData struct {
-	Symbol    string `json:"symbol"`
-	Price     string `json:"price"`
-	Quantity  string `json:"quantity"`
-	Side      string `json:"side"`
-	Timestamp int64  `json:"timestamp"`
-	TradeID   string `json:"tradeId"`
-}
-
-type OrderBookData struct {
-	Symbol    string     `json:"symbol"`
-	Bids      [][]string `json:"bids"`
-	Asks      [][]string `json:"asks"`
-	Timestamp int64      `json:"timestamp"`
+type Kline struct {
+	ID        uint   `gorm:"primaryKey"`
+	Symbol    string `gorm:"index"`
+	OpenTime  int64
+	CloseTime int64
+	Open      string
+	High      string
+	Low       string
+	Close     string
+	Volume    string
+	Timestamp int64
 }
 
 type DataCollector struct {
@@ -73,10 +63,10 @@ type DataCollector struct {
 	mu       sync.RWMutex
 	stopChan chan struct{}
 	wg       sync.WaitGroup
+	msgCount int
 }
 
 func NewDataCollector(configPath string) (*DataCollector, error) {
-	// Завантаження конфігурації
 	configData, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("не вдалося прочитати конфігурацію: %v", err)
@@ -87,7 +77,6 @@ func NewDataCollector(configPath string) (*DataCollector, error) {
 		return nil, fmt.Errorf("не вдалося розпарсити конфігурацію: %v", err)
 	}
 
-	// Підключення до бази даних
 	db, err := gorm.Open(sqlite.Open(config.DatabasePath), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
@@ -101,7 +90,6 @@ func NewDataCollector(configPath string) (*DataCollector, error) {
 		stopChan: make(chan struct{}),
 	}
 
-	// Створення таблиць для кожної пари
 	if err := collector.createTables(); err != nil {
 		return nil, fmt.Errorf("не вдалося створити таблиці: %v", err)
 	}
@@ -111,31 +99,38 @@ func NewDataCollector(configPath string) (*DataCollector, error) {
 
 func (dc *DataCollector) createTables() error {
 	for _, symbol := range dc.config.Symbols {
-		// Очищуємо назву символу для використання в назві таблиці
-		tableName := strings.ToLower(strings.ReplaceAll(symbol, "/", "_"))
+		tableName := strings.ToLower(strings.ReplaceAll(symbol, "_", ""))
 
-		// Створюємо таблиці для трейдів
+		// Таблиці для трейдів
 		tradeTableName := tableName + "_trades"
 		if err := dc.db.Table(tradeTableName).AutoMigrate(&Trade{}); err != nil {
 			return fmt.Errorf("не вдалося створити таблицю %s: %v", tradeTableName, err)
 		}
 
-		// Створюємо таблиці для order book
+		// Таблиці для order book
 		obTableName := tableName + "_orderbook"
 		if err := dc.db.Table(obTableName).AutoMigrate(&OrderBook{}); err != nil {
 			return fmt.Errorf("не вдалося створити таблицю %s: %v", obTableName, err)
 		}
 
-		log.Printf("Створено таблиці для пари %s: %s, %s", symbol, tradeTableName, obTableName)
+		// Таблиці для klines
+		klineTableName := tableName + "_klines"
+		if err := dc.db.Table(klineTableName).AutoMigrate(&Kline{}); err != nil {
+			return fmt.Errorf("не вдалося створити таблицю %s: %v", klineTableName, err)
+		}
+
+		log.Printf("Створено таблиці для пари %s", symbol)
 	}
 	return nil
 }
 
 func (dc *DataCollector) connect() error {
-	dialer := websocket.DefaultDialer
-	dialer.HandshakeTimeout = 10 * time.Second
+	wsURL := "wss://wbs.mexc.com/ws"
 
-	conn, _, err := dialer.Dial("wss://contract.mexc.com/ws", nil)
+	dialer := websocket.DefaultDialer
+	dialer.HandshakeTimeout = 15 * time.Second
+
+	conn, _, err := dialer.Dial(wsURL, nil)
 	if err != nil {
 		return fmt.Errorf("не вдалося підключитися до WebSocket: %v", err)
 	}
@@ -144,7 +139,7 @@ func (dc *DataCollector) connect() error {
 	dc.conn = conn
 	dc.mu.Unlock()
 
-	log.Println("Підключення до MEXC WebSocket встановлено")
+	log.Printf("✅ Підключення до MEXC встановлено: %s", wsURL)
 	return nil
 }
 
@@ -157,76 +152,100 @@ func (dc *DataCollector) subscribe() error {
 		return fmt.Errorf("WebSocket підключення не встановлено")
 	}
 
-	// Підписка на трейди
+	// Підписка на різні типи даних для кожного символу
+	id := 1
 	for _, symbol := range dc.config.Symbols {
-		tradeMsg := WSMessage{
-			Method: "sub.deal",
-			Params: []string{symbol},
-			ID:     1,
+		// Конвертуємо символ (BTC_USDT -> BTCUSDT)
+		mexcSymbol := strings.ReplaceAll(symbol, "_", "")
+
+		subscriptions := []map[string]interface{}{
+			// Trades (deals)
+			{
+				"method": "SUBSCRIPTION",
+				"params": []string{fmt.Sprintf("spot@public.deals.v3.api@%s", mexcSymbol)},
+				"id":     id,
+			},
+			// Order book ticker
+			{
+				"method": "SUBSCRIPTION",
+				"params": []string{fmt.Sprintf("spot@public.bookTicker.v3.api@%s", mexcSymbol)},
+				"id":     id + 1,
+			},
+			// Kline 1m
+			{
+				"method": "SUBSCRIPTION",
+				"params": []string{fmt.Sprintf("spot@public.kline.v3.api@%s@Min1", mexcSymbol)},
+				"id":     id + 2,
+			},
+			// Depth
+			{
+				"method": "SUBSCRIPTION",
+				"params": []string{fmt.Sprintf("spot@public.increase.depth.v3.api@%s", mexcSymbol)},
+				"id":     id + 3,
+			},
 		}
 
-		if err := conn.WriteJSON(tradeMsg); err != nil {
-			return fmt.Errorf("не вдалося підписатися на трейди для %s: %v", symbol, err)
+		for i, sub := range subscriptions {
+			if err := conn.WriteJSON(sub); err != nil {
+				log.Printf("Помилка підписки %d для %s: %v", i+1, symbol, err)
+				continue
+			}
+
+			log.Printf("📡 Підписано на %s (тип %d)", symbol, i+1)
+			time.Sleep(200 * time.Millisecond)
 		}
 
-		log.Printf("Підписано на трейди для %s", symbol)
-
-		// Підписка на order book
-		obMsg := WSMessage{
-			Method: "sub.depth",
-			Params: []interface{}{symbol, 10, "0.1"},
-			ID:     2,
-		}
-
-		if err := conn.WriteJSON(obMsg); err != nil {
-			return fmt.Errorf("не вдалося підписатися на order book для %s: %v", symbol, err)
-		}
-
-		log.Printf("Підписано на order book для %s", symbol)
+		id += 10 // Розділяємо ID для різних символів
 	}
 
 	return nil
 }
 
-func (dc *DataCollector) saveTrade(data map[string]interface{}) {
-	symbol, ok := data["symbol"].(string)
-	if !ok {
-		log.Printf("Невірний формат символу в трейді: %v", data)
-		return
-	}
-
-	price, ok := data["price"].(string)
-	if !ok {
-		log.Printf("Невірний формат ціни в трейді: %v", data)
-		return
-	}
-
-	quantity, ok := data["quantity"].(string)
-	if !ok {
-		log.Printf("Невірний формат кількості в трейді: %v", data)
-		return
-	}
-
-	side, ok := data["side"].(string)
-	if !ok {
-		log.Printf("Невірний формат сторони в трейді: %v", data)
-		return
-	}
-
+func (dc *DataCollector) saveTrade(symbol string, data map[string]interface{}) {
+	// Парсимо дані трейду
+	var price, quantity, side, tradeID string
 	var timestamp int64
-	if ts, ok := data["timestamp"].(float64); ok {
-		timestamp = int64(ts)
+
+	if p, ok := data["p"].(string); ok {
+		price = p
+	} else if p, ok := data["price"].(string); ok {
+		price = p
+	}
+
+	if q, ok := data["v"].(string); ok {
+		quantity = q
+	} else if q, ok := data["quantity"].(string); ok {
+		quantity = q
+	}
+
+	if s, ok := data["S"].(float64); ok {
+		if s == 1 {
+			side = "buy"
+		} else {
+			side = "sell"
+		}
+	} else if s, ok := data["side"].(string); ok {
+		side = s
+	}
+
+	if t, ok := data["t"].(float64); ok {
+		timestamp = int64(t)
+	} else if t, ok := data["timestamp"].(float64); ok {
+		timestamp = int64(t)
 	} else {
 		timestamp = time.Now().UnixMilli()
 	}
 
-	tradeID, ok := data["tradeId"].(string)
-	if !ok {
-		if id, ok := data["tradeId"].(float64); ok {
-			tradeID = fmt.Sprintf("%.0f", id)
-		} else {
-			tradeID = fmt.Sprintf("%d", timestamp)
-		}
+	if id, ok := data["i"].(string); ok {
+		tradeID = id
+	} else if id, ok := data["tradeId"].(string); ok {
+		tradeID = id
+	} else {
+		tradeID = fmt.Sprintf("%d_%s", timestamp, symbol)
+	}
+
+	if price == "" || quantity == "" {
+		return
 	}
 
 	trade := Trade{
@@ -238,51 +257,34 @@ func (dc *DataCollector) saveTrade(data map[string]interface{}) {
 		TradeID:   tradeID,
 	}
 
-	tableName := strings.ToLower(strings.ReplaceAll(symbol, "/", "_")) + "_trades"
+	tableName := strings.ToLower(strings.ReplaceAll(symbol, "_", "")) + "_trades"
 
 	if err := dc.db.Table(tableName).Create(&trade).Error; err != nil {
-		log.Printf("Помилка збереження трейду в %s: %v", tableName, err)
+		log.Printf("Помилка збереження трейду: %v", err)
+	} else {
+		log.Printf("💰 Трейд збережено: %s %s %s @ %s", symbol, side, quantity, price)
 	}
 }
 
-func (dc *DataCollector) saveOrderBook(data map[string]interface{}) {
-	symbol, ok := data["symbol"].(string)
-	if !ok {
-		log.Printf("Невірний формат символу в order book: %v", data)
-		return
-	}
-
-	bidsInterface, ok := data["bids"].([]interface{})
-	if !ok {
-		log.Printf("Невірний формат bids в order book: %v", data)
-		return
-	}
-
-	asksInterface, ok := data["asks"].([]interface{})
-	if !ok {
-		log.Printf("Невірний формат asks в order book: %v", data)
-		return
-	}
-
-	// Конвертуємо bids та asks в JSON строки
-	bidsJSON, err := json.Marshal(bidsInterface)
-	if err != nil {
-		log.Printf("Помилка конвертації bids в JSON: %v", err)
-		return
-	}
-
-	asksJSON, err := json.Marshal(asksInterface)
-	if err != nil {
-		log.Printf("Помилка конвертації asks в JSON: %v", err)
-		return
-	}
-
+func (dc *DataCollector) saveOrderBook(symbol string, data map[string]interface{}) {
+	var bids, asks interface{}
 	var timestamp int64
-	if ts, ok := data["timestamp"].(float64); ok {
-		timestamp = int64(ts)
+
+	if b, ok := data["bids"]; ok {
+		bids = b
+	}
+	if a, ok := data["asks"]; ok {
+		asks = a
+	}
+
+	if t, ok := data["t"].(float64); ok {
+		timestamp = int64(t)
 	} else {
 		timestamp = time.Now().UnixMilli()
 	}
+
+	bidsJSON, _ := json.Marshal(bids)
+	asksJSON, _ := json.Marshal(asks)
 
 	orderBook := OrderBook{
 		Symbol:    symbol,
@@ -291,32 +293,70 @@ func (dc *DataCollector) saveOrderBook(data map[string]interface{}) {
 		Timestamp: timestamp,
 	}
 
-	tableName := strings.ToLower(strings.ReplaceAll(symbol, "/", "_")) + "_orderbook"
+	tableName := strings.ToLower(strings.ReplaceAll(symbol, "_", "")) + "_orderbook"
 
 	if err := dc.db.Table(tableName).Create(&orderBook).Error; err != nil {
-		log.Printf("Помилка збереження order book в %s: %v", tableName, err)
+		log.Printf("Помилка збереження order book: %v", err)
+	} else {
+		log.Printf("📊 Order book збережено: %s", symbol)
 	}
 }
 
 func (dc *DataCollector) handleMessage(message []byte) {
+	dc.msgCount++
+
 	var wsResp map[string]interface{}
 	if err := json.Unmarshal(message, &wsResp); err != nil {
 		log.Printf("Помилка розбору повідомлення: %v", err)
 		return
 	}
 
-	// Перевіряємо тип повідомлення
-	if channel, ok := wsResp["channel"].(string); ok {
-		data, ok := wsResp["data"].(map[string]interface{})
-		if !ok {
-			return
-		}
+	// Логуємо кожне 10-е повідомлення для debug
+	if dc.msgCount%10 == 0 {
+		log.Printf("📨 Повідомлення #%d отримано", dc.msgCount)
+	}
 
-		switch {
-		case strings.Contains(channel, "deal"):
-			dc.saveTrade(data)
-		case strings.Contains(channel, "depth"):
-			dc.saveOrderBook(data)
+	// Перевіряємо відповідь на підписку
+	if code, ok := wsResp["code"].(float64); ok {
+		if msg, ok := wsResp["msg"].(string); ok {
+			if code != 0 {
+				log.Printf("⚠️ Помилка підписки: %s", msg)
+			} else if strings.Contains(msg, "success") {
+				log.Printf("✅ Підписка успішна: %s", msg)
+			}
+		}
+		return
+	}
+
+	// Обробляємо дані
+	if channel, ok := wsResp["channel"].(string); ok {
+		if data, ok := wsResp["data"]; ok {
+			// Визначаємо символ з каналу
+			parts := strings.Split(channel, "@")
+			if len(parts) >= 3 {
+				symbol := parts[2]
+				// Конвертуємо назад (BTCUSDT -> BTC_USDT)
+				if len(symbol) >= 6 {
+					formattedSymbol := symbol[:3] + "_" + symbol[3:]
+
+					switch {
+					case strings.Contains(channel, "deals"):
+						if dataArray, ok := data.([]interface{}); ok {
+							for _, item := range dataArray {
+								if tradeData, ok := item.(map[string]interface{}); ok {
+									dc.saveTrade(formattedSymbol, tradeData)
+								}
+							}
+						} else if tradeData, ok := data.(map[string]interface{}); ok {
+							dc.saveTrade(formattedSymbol, tradeData)
+						}
+					case strings.Contains(channel, "depth") || strings.Contains(channel, "bookTicker"):
+						if obData, ok := data.(map[string]interface{}); ok {
+							dc.saveOrderBook(formattedSymbol, obData)
+						}
+					}
+				}
+			}
 		}
 	}
 }
@@ -337,6 +377,8 @@ func (dc *DataCollector) listen() {
 				time.Sleep(time.Second)
 				continue
 			}
+
+			conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
 			_, message, err := conn.ReadMessage()
 			if err != nil {
@@ -369,11 +411,13 @@ func (dc *DataCollector) reconnect() {
 			dc.mu.RUnlock()
 
 			if !connected {
-				log.Println("Спроба переподключення...")
+				log.Println("🔄 Спроба переподключення...")
 				if err := dc.connect(); err != nil {
 					log.Printf("Помилка переподключення: %v", err)
 					continue
 				}
+
+				time.Sleep(2 * time.Second)
 
 				if err := dc.subscribe(); err != nil {
 					log.Printf("Помилка підписки після переподключення: %v", err)
@@ -388,34 +432,34 @@ func (dc *DataCollector) reconnect() {
 
 				dc.wg.Add(1)
 				go dc.listen()
-				log.Println("Переподключення успішне")
+				log.Println("✅ Переподключення успішне")
 			}
 		}
 	}
 }
 
 func (dc *DataCollector) Start() error {
-	// Початкове підключення
 	if err := dc.connect(); err != nil {
 		return err
 	}
+
+	time.Sleep(2 * time.Second)
 
 	if err := dc.subscribe(); err != nil {
 		return err
 	}
 
-	// Запуск горутин
 	dc.wg.Add(1)
 	go dc.listen()
 
 	go dc.reconnect()
 
-	log.Println("Збирач даних запущено")
+	log.Println("🚀 Збирач даних MEXC запущено")
 	return nil
 }
 
 func (dc *DataCollector) Stop() {
-	log.Println("Зупинка збирача даних...")
+	log.Println("⏹️ Зупинка збирача даних...")
 
 	close(dc.stopChan)
 
@@ -427,29 +471,25 @@ func (dc *DataCollector) Stop() {
 	dc.mu.Unlock()
 
 	dc.wg.Wait()
-	log.Println("Збирач даних зупинено")
+	log.Printf("✅ Збирач даних зупинено (оброблено %d повідомлень)", dc.msgCount)
 }
 
 func main() {
-	// Перевірка аргументів командного рядка
 	if len(os.Args) < 2 {
 		log.Fatal("Використання: go run main.go config.json")
 	}
 
 	configPath := os.Args[1]
 
-	// Створення збирача даних
 	collector, err := NewDataCollector(configPath)
 	if err != nil {
 		log.Fatalf("Помилка створення збирача: %v", err)
 	}
 
-	// Запуск збирача
 	if err := collector.Start(); err != nil {
 		log.Fatalf("Помилка запуску збирача: %v", err)
 	}
 
-	// Обробка сигналів для graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
