@@ -31,6 +31,7 @@ class FundingRate(Base):
 
 
 DATABASE_URL = "sqlite:////home/pasta/data_saver/data/mexc_futures_data.db"
+# DATABASE_URL = "sqlite:///mexc_futures_data.db"
 
 engine = sqlalchemy.create_engine(DATABASE_URL)
 
@@ -43,12 +44,12 @@ class DB:
 
     def add_all(self, data: list[dict]) -> None:
         def convert(d):
-            d["T"] = True if d["T"] == 1 else False
+            d["data"]["T"] = True if d["data"]["T"] == 1 else False
             return Trades(
-                time=d["t"],
-                price=d["p"],
-                side=d["T"],
-                volume=d["v"],
+                time=d["data"]["t"],
+                price=d["data"]["p"],
+                side=d["data"]["T"],
+                volume=d["data"]["v"],
             )
 
         for x in data:
@@ -87,6 +88,8 @@ class DB:
                                 print(f"зайві дані: {a}")
                         else:
                             break
+                    self.add_all(data["push.deal"])
+                    self.add_rate(data["push.funding.rate"])
 
                     # for x in data:
                     #     if ["channel"] == "push.deal":
