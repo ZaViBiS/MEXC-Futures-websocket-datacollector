@@ -30,7 +30,7 @@ class FundingRate(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
 
-DATABASE_URL = "sqlite:///mexc_futures_data.db"
+DATABASE_URL = "sqlite:////home/pasta/data_saver/data/mexc_futures_data.db"
 
 engine = sqlalchemy.create_engine(DATABASE_URL)
 
