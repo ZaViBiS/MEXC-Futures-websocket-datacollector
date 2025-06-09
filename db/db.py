@@ -41,37 +41,62 @@ class DB:
     def __init__(self) -> None:
         self.session = sessionmaker(bind=engine)
 
-    def add(self, data: dict) -> None:
-        data["T"] = True if data["T"] == 1 else False
-        data = Trades(
-            time=data["t"],
-            price=data["p"],
-            side=data["T"],
-            volume=data["v"],
-        )
-        with self.session.begin() as session:
-            session.add(data)
+    def add_all(self, data: list[dict]) -> None:
+        def convert(d):
+            d["T"] = True if d["T"] == 1 else False
+            return Trades(
+                time=d["t"],
+                price=d["p"],
+                side=d["T"],
+                volume=d["v"],
+            )
 
-    def add_rate(self, data: dict) -> None:
-        data = FundingRate(
-            time=data["ts"],
-            rate=data["data"]["rate"],
-            next_settle_time=data["data"]["nextSettleTime"],
-        )
+        for x in data:
+            data[data.index(x)] = convert(x)
+
         with self.session.begin() as session:
-            session.add(data)
+            session.add_all(data)
+
+    def add_rate(self, data: list[dict]) -> None:
+        def convert(d):
+            return FundingRate(
+                time=d["ts"],
+                rate=d["data"]["rate"],
+                next_settle_time=d["data"]["nextSettleTime"],
+            )
+
+        for x in data:
+            data[data.index(x)] = convert(x)
+
+        with self.session.begin() as session:
+            session.add_all(data)
 
     def loop(self):
         while True:
             try:
                 if not q.empty():
-                    data = q.get()
-                    if data["channel"] == "push.deal":
-                        self.add(data["data"])
-                    elif data["channel"] == "push.funding.rate":
-                        self.add_rate(data)
-                    else:
-                        print(f"зайві дані: {data}")
+                    data = {"push.deal": [], "push.funding.rate": []}
+                    while True:
+                        if not q.empty():
+                            a = q.get()
+                            if a["channel"] == "push.deal":
+                                data["push.deal"].append(a)
+                            elif a["channel"] == "push.funding.rate":
+                                data["push.funding.rate"].append(a)
+                            else:
+                                print(f"зайві дані: {a}")
+                        else:
+                            break
+
+                    # for x in data:
+                    #     if ["channel"] == "push.deal":
+                    #         self.add(data["data"])
+                    #     elif data["channel"] == "push.funding.rate":
+                    #         self.add_rate(data)
+                    #     else:
+                    #         print(f"зайві дані: {data}")
+                else:
+                    time.sleep(10)
             except Exception as e:
                 print(e)
                 time.sleep(1)
