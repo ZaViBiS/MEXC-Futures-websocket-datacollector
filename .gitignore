@@ -27,6 +27,7 @@ go.work.sum
 # env file
 .env
 venv
+__pycache__
 
 # Editor/IDE
 # .idea/

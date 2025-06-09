@@ -68,7 +68,7 @@ class DB:
                     data = q.get()
                     if data["channel"] == "push.deal":
                         self.add(data["data"])
-                    if data["channel"] == "push.funding.rate":
+                    elif data["channel"] == "push.funding.rate":
                         self.add_rate(data)
                     else:
                         print(f"зайві дані: {data}")
