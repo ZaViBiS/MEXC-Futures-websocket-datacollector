@@ -1,4 +1,6 @@
+from os import write
 import time
+import logging
 import sqlalchemy
 from sqlalchemy.orm import (
     Mapped,
@@ -9,6 +11,10 @@ from sqlalchemy.orm import (
 from sqlalchemy import BigInteger, Integer, Float, Boolean, String
 
 from shared.queue import q
+from shared.logging_setup import setup_logging
+
+setup_logging()
+log = logging.getLogger(__name__)
 
 Base = declarative_base()
 
@@ -66,21 +72,28 @@ class DB:
         while True:
             try:
                 if not q.empty():
+                    start = time.time()
+                    writes_cloc = 0
                     with self.session.begin() as session:
                         while True:
                             if not q.empty():
                                 data = q.get()
                                 if data["channel"] == "push.deal":
                                     session.add(self.data_to_model(data))
+                                    writes_cloc += 1
                                 elif data["channel"] == "push.funding.rate":
                                     session.add(self.data_to_funding_model(data))
+                                    writes_cloc += 1
                                 else:
-                                    print(f"зайві дані: {data}")
+                                    log.debug(f"зайві дані: {data}")
                             else:
                                 break
-
+                    log.info(
+                        f"час на запис в базу: {time.time() - start:.4f}s | було записано {writes_cloc} записів"
+                    )
+                    time.sleep(60)
                 else:
                     time.sleep(10)
             except Exception as e:
-                print(e)
+                log.error(e)
                 time.sleep(1)
