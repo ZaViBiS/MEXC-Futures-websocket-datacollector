@@ -7,13 +7,18 @@ import time
 
 from db.db import DB
 from shared.queue import q
+from shared.config import SYMBOLS
 
 
 URI = "wss://contract.mexc.com/edge"
-SYMBOL = "LTC_USDT"
-SUB_DEAL = {"method": "sub.deal", "param": {"symbol": SYMBOL}}
-SUB_FUND = {"method": "sub.funding.rate", "param": {"symbol": SYMBOL}}
-# SUB_DEPTH = {"method": "sub.depth", "param": {"symbol": SYMBOL}}
+
+
+def methods(symbol: str):
+    return {"method": "sub.deal", "param": {"symbol": symbol}}, {
+        "method": "sub.funding.rate",
+        "param": {"symbol": symbol},
+    }
+
 
 db = DB()
 
@@ -22,8 +27,10 @@ async def connect():
     while True:
         try:
             async with websockets.connect(URI, ping_interval=None) as web:
-                await web.send(json.dumps(SUB_DEAL))
-                await web.send(json.dumps(SUB_FUND))
+                for symbol in SYMBOLS:
+                    sub_deal, sub_fund = methods(symbol)
+                    await web.send(json.dumps(sub_deal))
+                    await web.send(json.dumps(sub_fund))
                 # await web.send(json.dumps(SUB_DEPTH))
                 start = 0
 
